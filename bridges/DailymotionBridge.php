@@ -1,203 +1,153 @@
 <?php
-class DailymotionBridge extends BridgeAbstract {
 
-	const MAINTAINER = 'mitsukarenai';
-	const NAME = 'Dailymotion Bridge';
-	const URI = 'https://www.dailymotion.com/';
-	const CACHE_TIMEOUT = 3600; // 1h
-	const DESCRIPTION = 'Returns the 5 newest videos by username/playlist or search';
+class DailymotionBridge extends BridgeAbstract
+{
+    const MAINTAINER = 'mitsukarenai';
+    const NAME = 'Dailymotion';
+    const URI = 'https://www.dailymotion.com/';
+    const CACHE_TIMEOUT = 3600; // 1h
+    const DESCRIPTION = 'Returns the 5 newest videos by username/playlist or search';
 
-	const PARAMETERS = array (
-		'By username' => array(
-			'u' => array(
-				'name' => 'username',
-				'required' => true
-			)
-		),
-		'By playlist id' => array(
-			'p' => array(
-				'name' => 'playlist id',
-				'required' => true
-			)
-		),
-		'From search results' => array(
-			's' => array(
-				'name' => 'Search keyword',
-				'required' => true
-			),
-			'pa' => array(
-				'name' => 'Page',
-				'type' => 'number',
-				'defaultValue' => 1,
-			)
-		)
-	);
+    const PARAMETERS = [
+        'By username' => [
+            'u' => [
+                'name' => 'username',
+                'required' => true,
+                'exampleValue' => 'moviepilot',
+            ]
+        ],
+        'By playlist id' => [
+            'p' => [
+                'name' => 'playlist id',
+                'required' => true,
+                'exampleValue' => 'x6xyc6',
+            ]
+        ],
+        'From search results' => [
+            's' => [
+                'name' => 'Search keyword',
+                'required' => true,
+                'exampleValue' => 'matrix',
+            ],
+            'pa' => [
+                'name' => 'Page',
+                'type' => 'number',
+                'defaultValue' => 1,
+            ]
+        ]
+    ];
 
-	private $feedName = '';
+    private $feedName = '';
 
-	private $apiUrl = 'https://api.dailymotion.com';
-	private $apiFields = 'created_time,description,id,owner.screenname,tags,thumbnail_url,title,url';
+    private $apiUrl = 'https://api.dailymotion.com';
+    private $apiFields = 'created_time,description,id,owner.screenname,tags,thumbnail_url,title,url';
 
-	public function getIcon() {
-		return 'https://static1-ssl.dmcdn.net/images/neon/favicons/android-icon-36x36.png.vf806ca4ed0deed812';
-	}
+    public function getIcon()
+    {
+        return 'https://static1.dmcdn.net/neon-user-ssr/prod/favicons/apple-icon-60x60.831b96ed0a8eca7f6539.png';
+    }
 
-	public function collectData() {
+    public function collectData()
+    {
+        $apiJson = getContents($this->getApiUrl());
+        $apiData = json_decode($apiJson, true);
 
-		if ($this->queriedContext === 'By username' || $this->queriedContext === 'By playlist id') {
+        if ($this->queriedContext === 'By playlist id') {
+            $this->feedName = $this->getPlaylistTitle($this->getInput('p'));
+        }
 
-			$apiJson = getContents($this->getApiUrl())
-				or returnServerError('Could not request: ' . $this->getApiUrl());
+        foreach ($apiData['list'] as $apiItem) {
+            $item = [];
 
-			$apiData = json_decode($apiJson, true);
+            $item['uri'] = $apiItem['url'];
+            $item['uid'] = $apiItem['id'];
+            $item['title'] = $apiItem['title'];
+            $item['timestamp'] = $apiItem['created_time'];
+            $item['author'] = $apiItem['owner.screenname'];
+            $item['content'] = '<p><a href="' . $apiItem['url'] . '">
+				<img src="' . $apiItem['thumbnail_url'] . '"></a></p><p>' . $apiItem['description'] . '</p>';
+            $item['categories'] = $apiItem['tags'];
+            $item['enclosures'][] = $apiItem['thumbnail_url'];
 
-			$this->feedName = $this->getPlaylistTitle($this->getInput('p'));
+            $this->items[] = $item;
+        }
+    }
 
-			foreach ($apiData['list'] as $apiItem) {
-				$item = array();
+    public function getName()
+    {
+        switch ($this->queriedContext) {
+            case 'By username':
+                $specific = $this->getInput('u');
+                break;
+            case 'By playlist id':
+                $specific = strtok($this->getInput('p'), '_');
 
-				$item['uri'] = $apiItem['url'];
-				$item['uid'] = $apiItem['id'];
-				$item['title'] = $apiItem['title'];
-				$item['timestamp'] = $apiItem['created_time'];
-				$item['author'] = $apiItem['owner.screenname'];
-				$item['content'] = '<p><a href="' . $apiItem['url'] . '">
-					<img src="' . $apiItem['thumbnail_url'] . '"></a></p><p>' . $apiItem['description'] . '</p>';
-				$item['categories'] = $apiItem['tags'];
-				$item['enclosures'][] = $apiItem['thumbnail_url'];
+                if ($this->feedName) {
+                    $specific = $this->feedName;
+                }
 
-				$this->items[] = $item;
-			}
-		}
+                break;
+            case 'From search results':
+                $specific = $this->getInput('s');
+                break;
+            default:
+                return parent::getName();
+        }
 
-		if ($this->queriedContext === 'From search results') {
+        return $specific . ' : Dailymotion';
+    }
 
-			$html = getSimpleHTMLDOM($this->getURI())
-				or returnServerError('Could not request Dailymotion.');
+    public function getURI()
+    {
+        $uri = self::URI;
 
-			foreach($html->find('div.media a.preview_link') as $element) {
-				$item = array();
+        switch ($this->queriedContext) {
+            case 'By username':
+                $uri .= 'user/' . urlencode($this->getInput('u'));
+                break;
+            case 'By playlist id':
+                $uri .= 'playlist/' . urlencode(strtok($this->getInput('p'), '_'));
+                break;
+            case 'From search results':
+                $uri .= 'search/' . urlencode($this->getInput('s'));
 
-				$item['id'] = str_replace('/video/', '', strtok($element->href, '_'));
-				$metadata = $this->getMetadata($item['id']);
+                if (!is_null($this->getInput('pa'))) {
+                    $pa = $this->getInput('pa');
 
-				if(empty($metadata)) {
-					continue;
-				}
+                    if ($this->getInput('pa') < 1) {
+                        $pa = 1;
+                    }
 
-				$item['uri'] = $metadata['uri'];
-				$item['title'] = $metadata['title'];
-				$item['timestamp'] = $metadata['timestamp'];
+                    $uri .= '/' . $pa;
+                }
+                break;
+            default:
+                return parent::getURI();
+        }
+        return $uri;
+    }
 
-				$item['content'] = '<a href="'
-					. $item['uri']
-					. '"><img src="'
-					. $metadata['thumbnailUri']
-					. '" /></a><br><a href="'
-					. $item['uri']
-					. '">'
-					. $item['title']
-					. '</a>';
+    private function getPlaylistTitle($id)
+    {
+        $apiJson = getContents($this->apiUrl . '/playlist/' . $this->getInput('p'));
+        $apiData = json_decode($apiJson, true);
+        return $apiData['name'];
+    }
 
-				$this->items[] = $item;
-
-				if (count($this->items) >= 5) {
-					break;
-				}
-			}
-		}
-	}
-
-	public function getName() {
-		switch($this->queriedContext) {
-		case 'By username':
-			$specific = $this->getInput('u');
-			break;
-		case 'By playlist id':
-			$specific = strtok($this->getInput('p'), '_');
-
-			if ($this->feedName) {
-				$specific = $this->feedName;
-			}
-
-			break;
-		case 'From search results':
-			$specific = $this->getInput('s');
-			break;
-		default: return parent::getName();
-		}
-
-		return $specific . ' : Dailymotion';
-	}
-
-	public function getURI(){
-		$uri = self::URI;
-		switch($this->queriedContext) {
-		case 'By username':
-			$uri .= 'user/' . urlencode($this->getInput('u'));
-			break;
-		case 'By playlist id':
-			$uri .= 'playlist/' . urlencode(strtok($this->getInput('p'), '_'));
-			break;
-		case 'From search results':
-			$uri .= 'search/' . urlencode($this->getInput('s'));
-
-			if(!is_null($this->getInput('pa'))) {
-				$pa = $this->getInput('pa');
-
-				if ($this->getInput('pa') < 1) {
-					$pa = 1;
-				}
-
-				$uri .= '/' . $pa;
-			}
-			break;
-		default: return parent::getURI();
-		}
-		return $uri;
-	}
-
-	private function getMetadata($id) {
-		$metadata = array();
-
-		$html = getSimpleHTMLDOM(self::URI . 'video/' . $id);
-
-		if(!$html) {
-			return $metadata;
-		}
-
-		$metadata['title'] = $html->find('meta[property=og:title]', 0)->getAttribute('content');
-		$metadata['timestamp'] = strtotime(
-			$html->find('meta[property=video:release_date]', 0)->getAttribute('content')
-		);
-		$metadata['thumbnailUri'] = $html->find('meta[property=og:image]', 0)->getAttribute('content');
-		$metadata['uri'] = $html->find('meta[property=og:url]', 0)->getAttribute('content');
-		return $metadata;
-	}
-
-	private function getPlaylistTitle($id) {
-		$title = '';
-
-		$url = self::URI . 'playlist/' . $id;
-
-		$html = getSimpleHTMLDOM($url)
-			or returnServerError('Could not request: ' . $url);
-
-		$title = $html->find('meta[property=og:title]', 0)->getAttribute('content');
-		return $title;
-	}
-
-	private function getApiUrl() {
-
-		switch($this->queriedContext) {
-			case 'By username':
-				return $this->apiUrl . '/user/' . $this->getInput('u')
-					. '/videos?fields=' . urlencode($this->apiFields) . '&availability=1&sort=recent&limit=5';
-				break;
-			case 'By playlist id':
-				return $this->apiUrl . '/playlist/' . $this->getInput('p')
-					. '/videos?fields=' . urlencode($this->apiFields) . '&limit=5';
-				break;
-		}
-	}
+    private function getApiUrl()
+    {
+        switch ($this->queriedContext) {
+            case 'By username':
+                return $this->apiUrl . '/user/' . $this->getInput('u')
+                    . '/videos?fields=' . urlencode($this->apiFields) . '&availability=1&sort=recent&limit=5';
+                break;
+            case 'By playlist id':
+                return $this->apiUrl . '/playlist/' . $this->getInput('p')
+                    . '/videos?fields=' . urlencode($this->apiFields) . '&limit=5';
+                break;
+            case 'From search results':
+                return $this->apiUrl . '/videos?search=' . $this->getInput('s') . '&fields=' . urlencode($this->apiFields) . '&limit=5';
+                break;
+        }
+    }
 }

@@ -1,38 +1,72 @@
 <?php
-require_once('GithubIssueBridge.php');
-class GitHubPullRequestBridge extends GithubIssueBridge {
-	const MAINTAINER = 'Yaman Qalieh';
-	const NAME = 'GitHub Pull Request';
-	const DESCRIPTION = 'Returns the pull request or comments of a pull request of a GitHub project';
 
-	const PARAMETERS = array(
-		'global' => array(
-			'u' => array(
-				'name' => 'User name',
-				'required' => true
-			),
-			'p' => array(
-				'name' => 'Project name',
-				'required' => true
-			)
-		),
-		'Project Pull Requests' => array(
-			'c' => array(
-				'name' => 'Show Pull Request Comments',
-				'type' => 'checkbox'
-			)
-		),
-		'Pull Request comments' => array(
-			'i' => array(
-				'name' => 'Pull Request number',
-				'type' => 'number',
-				'required' => true
-			)
-		)
-	);
+declare(strict_types=1);
 
-	const BRIDGE_OPTIONS = array(0 => 'Project Pull Requests', 1 => 'Pull Request comments');
-	const URL_PATH = 'pull';
-	const SEARCH_QUERY_PATH = 'pulls';
-	const SEARCH_QUERY = '?q=is%3Apr+sort%3Aupdated-desc';
+class GitHubPullRequestBridge extends BridgeAbstract
+{
+    const MAINTAINER = 'dvikan';
+    const NAME = 'GitHub Pull Request';
+    const URI = 'https://github.com/';
+    const CACHE_TIMEOUT = 3600 * 24; // 24h
+    const DESCRIPTION = 'Returns the pull request or comments of a pull request of a GitHub project';
+    const CONFIGURATION = [
+        'token' => [
+            'required' => false,
+        ],
+    ];
+
+    const PARAMETERS = [
+        'global' => [
+            'u' => [
+                'name' => 'User name',
+                'exampleValue' => 'RSS-Bridge',
+                'required' => true
+            ],
+            'p' => [
+                'name' => 'Project name',
+                'exampleValue' => 'rss-bridge',
+                'required' => true
+            ]
+        ],
+        'Project Pull Requests' => [
+            'c' => [
+                'name' => 'Show Pull Request Comments',
+                'type' => 'checkbox'
+            ],
+            'q' => [
+                'name' => 'NOT IN USE',
+                'required' => false,
+            ]
+        ],
+        'Pull Request comments' => [
+            'i' => [
+                'name' => 'Pull Request number',
+                'type' => 'number',
+                'exampleValue' => '2100',
+                'required' => true
+            ]
+        ]
+    ];
+
+    public function collectData()
+    {
+        $client = new GithubClient($this->cache, $this->logger, $this->getOption('token'));
+
+        $owner = $this->getInput('u');
+        $repo = $this->getInput('p');
+        $id = $this->getInput('i');
+
+        if (! $repo) {
+            return;
+        }
+
+        switch ($this->queriedContext) {
+            case 'Project Pull Requests':
+                $this->items = $client->fetchPullRequests($owner, $repo);
+                break;
+            case 'Pull Request comments':
+                $this->items = $client->fetchPullRequestComments($owner, $repo, $id);
+                break;
+        }
+    }
 }

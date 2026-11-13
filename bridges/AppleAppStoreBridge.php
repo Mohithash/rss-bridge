@@ -1,149 +1,250 @@
 <?php
 
-class AppleAppStoreBridge extends BridgeAbstract {
+class AppleAppStoreBridge extends BridgeAbstract
+{
+    const MAINTAINER = 'NohamR';
+    const NAME = 'Apple App Store';
+    const URI = 'https://apps.apple.com/';
+    const CACHE_TIMEOUT = 3600; // 1h
+    const DESCRIPTION = 'Returns version updates for a specific application';
 
-	const MAINTAINER = 'captn3m0';
-	const NAME = 'Apple App Store';
-	const URI = 'https://apps.apple.com/';
-	const CACHE_TIMEOUT = 3600; // 1h
-	const DESCRIPTION = 'Returns version updates for a specific application';
+    const PARAMETERS = [[
+        'id' => [
+            'name'  => 'Application ID',
+            'required'  => true,
+            'exampleValue'  => '310633997'
+        ],
+        // 'p' => [
+        //     'name'  => 'Platform',
+        //     'type'  => 'list',
+        //     'values'    => [
+        //         'iPad'  => 'ipad',
+        //         'iPhone'    => 'iphone',
+        //         'Mac'   => 'mac',
+        //         'Web'   => 'web',
+        //         'Apple TV'  => 'appletv',
+        //     ],
+        //     'defaultValue'  => 'mac',
+        // ],
+        # The platform parameter is currently not used in the URL construction,
+        # but it may be useful for future enhancements or for filtering version
+        # history based on platform-specific releases.
+        'p' => [
+            'name'  => 'Platform',
+            'type'  => 'list',
+            'values'    => [
+                'Mac'   => 'mac',
+            ],
+            'defaultValue'  => 'mac',
+        ],
+        'country'   => [
+            'name'  => 'Store Country',
+            'type'  => 'list',
+            'values'    => [
+                'US'    => 'US',
+                'India' => 'IN',
+                'Canada' => 'CA',
+                'Germany' => 'DE',
+                'Netherlands' => 'NL',
+                'Belgium (NL)' => 'BENL',
+                'Belgium (FR)' => 'BEFR',
+                'France' => 'FR',
+                'Italy' => 'IT',
+                'United Kingdom' => 'UK',
+                'Spain' => 'ES',
+                'Portugal' => 'PT',
+                'Australia' => 'AU',
+                'New Zealand' => 'NZ',
+                'Indonesia' => 'ID',
+                'Brazil' => 'BR',
+            ],
+            'defaultValue'  => 'US',
+        ],
+        'debug' => [
+            'name' => 'Debug Mode',
+            'type' => 'checkbox',
+            'defaultValue' => false
+        ]
+    ]];
 
-	const PARAMETERS = array(array(
-		'id' => array(
-			'name'	=> 'Application ID',
-			'required'	=> true,
-			'exampleValue'	=> '310633997'
-		),
-		'p' => array(
-			'name'	=> 'Platform',
-			'type'	=> 'list',
-			'values'	=> array(
-				'iPad'	=> 'ipad',
-				'iPhone'	=> 'iphone',
-				'Mac'	=> 'mac',
+    private $name;
 
-				// The following 2 are present in responses
-				// but not yet tested
-				'Web'	=> 'web',
-				'Apple TV'	=> 'appletv',
-			),
-			'defaultValue'	=> 'iphone',
-		),
-		'country'	=> array(
-			'name'	=> 'Store Country',
-			'type'	=> 'list',
-			'values'	=> array(
-				'US'	=> 'US',
-				'India'	=> 'IN',
-				'Canada'	=> 'CA'
-			),
-			'defaultValue'	=> 'US',
-		),
-	));
+    private function makeHtmlUrl()
+    {
+        $id = $this->getInput('id');
+        $country = strtolower($this->getInput('country'));
+        return sprintf('https://apps.apple.com/%s/app/id%s', $country, $id);
+    }
 
-	const PLATFORM_MAPPING = array(
-		'iphone'	=> 'ios',
-		'ipad'	=> 'ios',
-	);
+    // Apple answers /{country}/app/id{id} with a 301 to the slugged URL,
+    // which getContents() does not follow. The lookup API returns that URL.
+    private function resolveHtmlUrl()
+    {
+        $id = $this->getInput('id');
+        $country = strtolower($this->getInput('country'));
+        $lookupUrl = sprintf('https://itunes.apple.com/lookup?id=%s&country=%s', urlencode($id), urlencode($country));
 
-	private function makeHtmlUrl($id, $country){
-		return 'https://apps.apple.com/' . $country . '/app/id' . $id;
-	}
+        try {
+            $json = Json::decode(getContents($lookupUrl));
+            $url = $json['results'][0]['trackViewUrl'] ?? null;
+            if ($url) {
+                $this->debugLog(sprintf('Resolved canonical URL via lookup API: %s', $url));
+                return $url;
+            }
+        } catch (\Exception $e) {
+            $this->debugLog(sprintf('Lookup API failed: %s', $e->getMessage()));
+        }
 
-	private function makeJsonUrl($id, $platform, $country){
-		return "https://amp-api.apps.apple.com/v1/catalog/$country/apps/$id?platform=$platform&extend=versionHistory";
-	}
+        return $this->makeHtmlUrl();
+    }
 
-	public function getName(){
-		if (isset($this->name)) {
-			return $this->name . ' - AppStore Updates';
-		}
+    private function getHtmlRequestHeaders()
+    {
+        return [
+            'accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+            'cache-control: no-cache',
+            'pragma: no-cache',
+            'upgrade-insecure-requests: 1',
+            'user-agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36',
+        ];
+    }
 
-		return parent::getName();
-	}
+    public function getName()
+    {
+        if (isset($this->name)) {
+            return sprintf('%s - AppStore Updates', $this->name);
+        }
 
-	/**
-	 * In case of some platforms, the data is present in the initial response
-	 */
-	private function getDataFromShoebox($id, $platform, $country){
-		$uri = $this->makeHtmlUrl($id, $country);
-		$html = getSimpleHTMLDOMCached($uri, 3600);
-		$script = $html->find('script[id="shoebox-ember-data-store"]', 0);
+        return parent::getName();
+    }
 
-		$json = json_decode($script->innertext, true);
-		return $json['data'];
-	}
+    private function debugLog($message)
+    {
+        if ($this->getInput('debug')) {
+            $this->logger->info(sprintf('[AppleAppStoreBridge] %s', $message));
+        }
+    }
 
-	private function getJWTToken($id, $platform, $country){
-		$uri = $this->makeHtmlUrl($id, $country);
+    private function getAppData()
+    {
+        $url = $this->resolveHtmlUrl();
+        $this->debugLog(sprintf('Fetching HTML page for serialized data extraction: %s', $url));
+        $content = getContents($url, $this->getHtmlRequestHeaders());
 
-		$html = getSimpleHTMLDOMCached($uri, 3600);
+        $startTag = '<script type="application/json" id="serialized-server-data">';
+        $startPos = strpos($content, $startTag);
+        if ($startPos === false) {
+            throw new \Exception('Failed to locate serialized server data in HTML page');
+        }
 
-		$meta = $html->find('meta[name="web-experience-app/config/environment"]', 0);
+        $jsonStart = $startPos + strlen($startTag);
+        $endPos = strpos($content, '</script>', $jsonStart);
+        if ($endPos === false) {
+            throw new \Exception('Failed to locate end of serialized server data');
+        }
 
-		$json = urldecode($meta->content);
+        $serializedServerData = html_entity_decode(substr($content, $jsonStart, $endPos - $jsonStart), ENT_QUOTES | ENT_HTML5);
 
-		$json = json_decode($json);
+        try {
+            $json = Json::decode($serializedServerData);
+        } catch (\Exception $e) {
+            throw new \Exception(sprintf('Failed to parse serialized server data: %s', $e->getMessage()));
+        }
 
-		return $json->MEDIA_API->token;
-	}
+        if (!isset($json['data']) || empty($json['data'])) {
+            throw new \Exception('No app data found in serialized server data');
+        }
 
-	private function getAppData($id, $platform, $country, $token){
-		$uri = $this->makeJsonUrl($id, $platform, $country);
+        $this->debugLog('Successfully retrieved app data from HTML page');
+        return $json['data'][0]['data'] ?? $json['data'][0];
+    }
 
-		$headers = array(
-			"Authorization: Bearer $token",
-		);
+    private function extractAppDetails($data)
+    {
+        if (isset($data['lockup'])) {
+            $this->name = $data['lockup']['title'] ?? null;
+            $author = $data['developerAction']['title'] ?? ($data['lockup']['developerTagline'] ?? null);
+            $this->debugLog(sprintf('Found app details in lockup: %s by %s', $this->name, $author));
+            return [$this->name, $author];
+        }
 
-		$json = json_decode(getContents($uri, $headers), true);
+        if (isset($data['title'])) {
+            $this->name = $data['title'];
+            $author = $data['developerAction']['title'] ?? ($data['lockup']['developerTagline'] ?? null);
+            $this->debugLog(sprintf('Found app details in title: %s by %s', $this->name, $author));
+            return [$this->name, $author];
+        }
 
-		return $json['data'][0];
-	}
+        if (isset($data['attributes'])) {
+            $this->name = $data['attributes']['name'] ?? null;
+            $author = $data['attributes']['artistName'] ?? null;
+            $this->debugLog(sprintf('Found app details in attributes: %s by %s', $this->name, $author));
+            return [$this->name, $author];
+        }
 
-	/**
-	 * Parses the version history from the data received
-	 * @return array list of versions with details on each element
-	 */
-	private function getVersionHistory($data, $platform){
-		switch($platform) {
-			case 'mac':
-				return $data['relationships']['platforms']['data'][0]['attributes']['versionHistory'];
-			default:
-				$os = self::PLATFORM_MAPPING[$platform];
-				return $data['attributes']['platformAttributes'][$os]['versionHistory'];
-		}
-	}
+        // Fallback to default values if not found
+        $this->name = sprintf('App %s', $this->getInput('id'));
+        $this->debugLog(sprintf('App details not found, using default: %s', $this->name));
+        return [$this->name, 'Unknown Developer'];
+    }
 
-	public function collectData() {
-		$id = $this->getInput('id');
-		$country = $this->getInput('country');
-		$platform = $this->getInput('p');
+    private function getVersionHistory($data)
+    {
+        $this->debugLog('Extracting version history from serialized server data');
 
-		switch ($platform) {
-			case 'mac':
-				$data = $this->getDataFromShoebox($id, $platform, $country);
-				break;
+        $version_history = [];
 
-			default:
-				$token = $this->getJWTToken($id, $platform, $country);
-				$data = $this->getAppData($id, $platform, $country, $token);
-		}
+        $pageData = $data['shelfMapping']['mostRecentVersion']['seeAllAction']['pageData'] ?? [];
+        $shelves = $pageData['shelves'] ?? [];
 
-		$versionHistory = $this->getVersionHistory($data, $platform);
-		$name = $this->name = $data['attributes']['name'];
-		$author = $data['attributes']['artistName'];
+        foreach ($shelves as $shelf) {
+            foreach (($shelf['items'] ?? []) as $entry) {
+                if (($entry['$kind'] ?? null) !== 'TitledParagraph') {
+                    continue;
+                }
 
-		foreach ($versionHistory as $row) {
-			$item = array();
+                $version_history[] = [
+                    'versionDisplay' => $entry['primarySubtitle'] ?? 'Unknown Version',
+                    'releaseNotes' => $entry['text'] ?? 'No release notes available',
+                    'releaseDate' => $entry['secondarySubtitle'] ?? null,
+                ];
+            }
+        }
 
-			$item['content'] = nl2br($row['releaseNotes']);
-			$item['title'] = $name . ' - ' . $row['versionDisplay'];
-			$item['timestamp'] = $row['releaseDate'];
-			$item['author'] = $author;
+        if (empty($version_history)) {
+            $this->debugLog('No version history found');
+        }
 
-			$item['uri'] = $this->makeHtmlUrl($id, $country);
+        return $version_history;
+    }
 
-			$this->items[] = $item;
-		}
-	}
+    public function collectData()
+    {
+        $this->debugLog('Getting app data');
+        $data = $this->getAppData();
+
+        // Get app name and author using array destructuring
+        [$name, $author] = $this->extractAppDetails($data);
+
+        // Get version history
+        $version_history = $this->getVersionHistory($data);
+        $this->debugLog(sprintf('Found %d versions for %s', count($version_history), $name));
+
+        foreach ($version_history as $entry) {
+            $version = $entry['versionDisplay'] ?? 'Unknown Version';
+            $release_notes = $entry['releaseNotes'] ?? 'No release notes available';
+            $release_date = $entry['releaseDate'] ?? 'Unknown Date';
+
+            $item = [];
+            $item['title'] = sprintf('%s - %s', $name, $version);
+            $item['content'] = nl2br($release_notes) ?: 'No release notes available';
+            $item['timestamp'] = strtotime($release_date) ?: $release_date;
+            $item['author'] = $author;
+            $item['uri'] = $data['canonicalURL'] ?? $this->makeHtmlUrl();
+
+            $this->items[] = $item;
+        }
+
+        $this->debugLog(sprintf('Successfully collected %d items', count($this->items)));
+    }
 }

@@ -1,252 +1,420 @@
 <?php
 
-class RedditBridge extends BridgeAbstract {
+/**
+ * This bridge does NOT use reddit's official rss feeds.
+ *
+ * This bridge uses Reddit's JSON API.
+ *
+ * It uses the legacy unauthenticated API by default.
+ * Configure both `app_id` and `app_secret` to use OAuth2 instead.
+ */
+class RedditBridge extends BridgeAbstract
+{
+    const MAINTAINER = 'dawidsowa';
+    const NAME = 'Reddit';
+    const URI = 'https://old.reddit.com';
+    const CACHE_TIMEOUT = 60 * 60 * 2; // 2h
+    const DESCRIPTION = 'Return hot submissions from Reddit';
 
-	const MAINTAINER = 'dawidsowa';
-	const NAME = 'Reddit Bridge';
-	const URI = 'https://www.reddit.com';
-	const DESCRIPTION = 'Return hot submissions from Reddit';
+    const CONFIGURATION = [
+        'app_id' => [
+            'required' => false,
+        ],
+        'app_secret' => [
+            'required' => false,
+        ],
+    ];
 
-	const PARAMETERS = array(
-		'global' => array(
-			'score' => array(
-				'name' => 'Minimal score',
-				'required' => false,
-				'type' => 'number',
-				'exampleValue' => 100,
-				'title' => 'Filter out posts with lower score'
-			)
-		),
-		'single' => array(
-			'r' => array(
-				'name' => 'SubReddit',
-				'required' => true,
-				'exampleValue' => 'selfhosted',
-				'title' => 'SubReddit name'
-			)
-		),
-		'multi' => array(
-			'rs' => array(
-				'name' => 'SubReddits',
-				'required' => true,
-				'exampleValue' => 'selfhosted, php',
-				'title' => 'SubReddit names, separated by commas'
-			)
-		),
-		'user' => array(
-			'u' => array(
-				'name' => 'User',
-				'required' => true,
-				'title' => 'User name'
-			),
-			'comments' => array(
-				'type' => 'checkbox',
-				'name' => 'Comments',
-				'title' => 'Whether to return comments',
-				'defaultValue' => false
-			)
-		)
-	);
+    const PARAMETERS = [
+        'global' => [
+            'score' => [
+                'name' => 'Minimal score',
+                'required' => false,
+                'type' => 'number',
+                'exampleValue' => 100,
+                'title' => 'Filter out posts with lower score. Set to -1 to disable. If both score and comments are set, an OR is applied.',
+            ],
+            'min_comments' => [
+                'name' => 'Minimal number of comments',
+                'required' => false,
+                'type' => 'number',
+                'exampleValue' => 100,
+                'title' => 'Filter out posts with lower number of comments. Set to -1 to disable. If both score and comments are set, an OR is applied.',
+                'defaultValue' => -1
+            ],
+            'd' => [
+                'name' => 'Sort By',
+                'type' => 'list',
+                'title' => 'Sort by new, hot, top or relevancy',
+                'values' => [
+                    'Hot' => 'hot',
+                    'Relevance' => 'relevance',
+                    'New' => 'new',
+                    'Top' => 'top',
+                    'Comments' => 'comments',
+                ],
+                'defaultValue' => 'Hot'
+            ],
+            't' => [
+                'name' => 'Time',
+                'type' => 'list',
+                'title' => 'Sort by new, hot, top or relevancy',
+                'values' => [
+                    'All' => 'all',
+                    'Year' => 'year',
+                    'Month' => 'month',
+                    'Week' => 'week',
+                    'Day' => 'day',
+                    'Hour' => 'hour',
+                ],
+                'defaultValue' => 'week'
+            ],
+            'search' => [
+                'name' => 'Keyword search',
+                'required' => false,
+                'exampleValue' => 'cats, dogs',
+                'title' => 'Keyword search, separated by commas'
+            ],
+            'frontend' => [
+                'type' => 'list',
+                'name' => 'frontend',
+                'title' => 'choose frontend for  reddit',
+                'values' => [
+                    'old.reddit.com' => 'https://old.reddit.com',
+                    'reddit.com' => 'https://reddit.com',
+                    'libreddit.kavin.rocks' => 'https://libreddit.kavin.rocks',
+                ]
+            ]
+        ],
+        'single' => [
+            'r' => [
+                'name' => 'SubReddit',
+                'required' => true,
+                'exampleValue' => 'selfhosted',
+                'title' => 'SubReddit name'
+            ],
+            'f' => [
+                'name' => 'Flair',
+                'required' => false,
+                'exampleValue' => 'Proxy',
+                'title' => 'Flair filter'
+            ]
+        ],
+        'multi' => [
+            'rs' => [
+                'name' => 'SubReddits',
+                'required' => true,
+                'exampleValue' => 'selfhosted, php',
+                'title' => 'SubReddit names, separated by commas'
+            ]
+        ],
+        'user' => [
+            'u' => [
+                'name' => 'User',
+                'required' => true,
+                'exampleValue' => 'shwikibot',
+                'title' => 'User name'
+            ],
+            'comments' => [
+                'type' => 'checkbox',
+                'name' => 'Comments',
+                'title' => 'Whether to return comments',
+                'defaultValue' => false
+            ]
+        ]
+    ];
 
-	public function detectParameters($url) {
-		$parsed_url = parse_url($url);
+    private ?RedditClient $redditClient = null;
 
-		if ($parsed_url['host'] != 'www.reddit.com' && $parsed_url['host'] != 'old.reddit.com') return null;
+    public function collectData()
+    {
+        $forbiddenKey = 'reddit_forbidden';
+        if ($this->cache->get($forbiddenKey)) {
+            throwRateLimitException();
+        }
 
-		$path = explode('/', $parsed_url['path']);
+        $rateLimitKey = 'reddit_rate_limit';
+        if ($this->cache->get($rateLimitKey)) {
+            throwRateLimitException();
+        }
 
-		if ($path[1] == 'r') {
-			return array(
-				'r' => $path[2]
-			);
-		} elseif ($path[1] == 'user') {
-			return array(
-				'u' => $path[2]
-			);
-		} else {
-			return null;
-		}
-	}
+        try {
+            $this->collectDataInternal();
+        } catch (HttpException $e) {
+            if ($e->getCode() === 403) {
+                // 403 Forbidden
+                // This can possibly mean that reddit has permanently blocked this server's ip address
+                $this->cache->set($forbiddenKey, true, 60 * 61);
+                throwRateLimitException();
+            } elseif ($e->getCode() === 429) {
+                $this->cache->set($rateLimitKey, true, 60 * 61);
+                throwRateLimitException();
+            }
+            throw $e;
+        }
+    }
 
-	public function getIcon() {
-		return 'https://www.redditstatic.com/desktop2x/img/favicon/favicon-96x96.png';
-	}
+    private function collectDataInternal(): void
+    {
+        $user = false;
+        $comments = false;
+        $frontend = $this->getInput('frontend');
+        if ($frontend == '') {
+            $frontend = 'https://old.reddit.com';
+        }
+        $section = $this->getInput('d');
+        $time = $this->getInput('t');
 
-	public function getName() {
-		if ($this->queriedContext == 'single') {
-			return 'Reddit r/' . $this->getInput('r');
-		} elseif ($this->queriedContext == 'user') {
-			return 'Reddit u/' . $this->getInput('u');
-		} else {
-			return self::NAME;
-		}
-	}
+        switch ($this->queriedContext) {
+            case 'single':
+                $subreddits[] = $this->getInput('r');
+                break;
+            case 'multi':
+                $subreddits = explode(',', $this->getInput('rs'));
+                break;
+            case 'user':
+                $subreddits[] = $this->getInput('u');
+                $user = true;
+                $comments = $this->getInput('comments');
+                break;
+        }
 
-	public function collectData() {
+        $search = $this->getInput('search');
+        $flareInput = $this->getInput('f');
+        $min_score = $this->getInput('score');
+        $min_comments = $this->getInput('min_comments');
 
-		$user = false;
-		$comments = false;
+        foreach ($subreddits as $subreddit) {
+            $parameters = self::createSearchParameters($search, $flareInput, $subreddit, $user, $section, $time, $this->queriedContext);
+            $response = $this->getRedditClient()->search($parameters);
 
-		switch ($this->queriedContext) {
-			case 'single':
-				$subreddits[] = $this->getInput('r');
-				break;
-			case 'multi':
-				$subreddits = explode(',', $this->getInput('rs'));
-				break;
-			case 'user':
-				$subreddits[] = $this->getInput('u');
-				$user = true;
-				$comments = $this->getInput('comments');
-				break;
-		}
+            $parsedJson = Json::decode($response->getBody(), false);
 
-		foreach ($subreddits as $subreddit) {
-			$name = trim($subreddit);
+            foreach ($parsedJson->data->children as $post) {
+                if ($post->kind == 't1' && !$comments) {
+                    continue;
+                }
 
-			$values = getContents(self::URI . ($user ? '/user/' : '/r/') . $name . '.json')
-			or returnServerError('Unable to fetch posts!');
-			$decodedValues = json_decode($values);
+                $data = $post->data;
 
-			foreach ($decodedValues->data->children as $post) {
-				if ($post->kind == 't1' && !$comments) {
-					continue;
-				}
+                if ($min_score >= 0 && $min_comments >= 0) {
+                    if ($data->num_comments < $min_comments || $data->score < $min_score) {
+                        continue;
+                    }
+                } elseif ($min_score >= 0) {
+                    if ($data->score < $min_score) {
+                        continue;
+                    }
+                } elseif ($min_comments >= 0) {
+                    if ($data->num_comments < $min_comments) {
+                        continue;
+                    }
+                }
 
-				$data = $post->data;
+                $item = [];
+                $item['author'] = $data->author;
+                $item['uid'] = $data->id;
+                $item['timestamp'] = $data->created_utc;
+                $item['uri'] = $this->urlEncodePathParts($data->permalink);
 
-				if ($data->score < $this->getInput('score')) {
-					continue;
-				}
+                if ($frontend != 'https://old.reddit.com') {
+                    $item['uri'] = preg_replace('#^https://old\.reddit\.com#', $frontend, $item['uri']);
+                }
 
-				$item = array();
-				$item['author'] = $data->author;
-				$item['uid'] = $data->id;
-				$item['timestamp'] = $data->created_utc;
-				$item['uri'] = $this->encodePermalink($data->permalink);
+                $item['categories'] = [];
 
-				$item['categories'] = array();
+                if ($post->kind == 't1') {
+                    $item['title'] = 'Comment: ' . $data->link_title;
+                } else {
+                    $item['title'] = $data->title;
 
-				if ($post->kind == 't1') {
-					$item['title'] = 'Comment: ' . $data->link_title;
-				} else {
-					$item['title'] = $data->title;
+                    $item['categories'][] = $data->link_flair_text;
+                    $item['categories'][] = $data->pinned ? 'Pinned' : null;
+                    $item['categories'][] = $data->spoiler ? 'Spoiler' : null;
+                }
 
-					$item['categories'][] = $data->link_flair_text;
-					$item['categories'][] = $data->pinned ? 'Pinned' : null;
-					$item['categories'][] = $data->spoiler ? 'Spoiler' : null;
-				}
+                $item['categories'][] = $data->over_18 ? 'NSFW' : null;
+                $item['categories'] = array_filter($item['categories']);
 
-				$item['categories'][] = $data->over_18 ? 'NSFW' : null;
-				$item['categories'] = array_filter($item['categories']);
+                if ($post->kind == 't1') {
+                    // Comment
 
-				if ($post->kind == 't1') {
-					// Comment
+                    $item['content'] = htmlspecialchars_decode($data->body_html);
+                } elseif ($data->is_self && isset($data->selftext_html)) {
+                    // Text post
 
-					$item['content']
-						= htmlspecialchars_decode($data->body_html);
+                    $item['content'] = htmlspecialchars_decode($data->selftext_html);
+                } elseif (isset($data->post_hint) && $data->post_hint == 'link') {
+                    // Link with preview
 
-				} elseif ($data->is_self) {
-					// Text post
+                    if (isset($data->media)) {
+                        // todo: maybe switch on the type
+                        if (isset($data->media->oembed->html)) {
+                            // Reddit embeds content for some sites (e.g. Twitter)
+                            $embed = htmlspecialchars_decode($data->media->oembed->html);
+                        } else {
+                            $embed = '';
+                        }
+                    } else {
+                        $embed = '';
+                    }
 
-					$item['content']
-						= htmlspecialchars_decode($data->selftext_html);
+                    $item['content'] = $this->createFigureLink($data->url, $data->thumbnail, $data->domain) . $embed;
+                } elseif (isset($data->post_hint) && $data->post_hint == 'image') {
+                    // Single image
 
-				} elseif (isset($data->post_hint) ? $data->post_hint == 'link' : false) {
-					// Link with preview
+                    $item['content'] = $this->createLink($this->urlEncodePathParts($data->permalink), '<img src="' . $data->url . '" />');
+                } elseif ($data->is_gallery ?? false) {
+                    // Multiple images
 
-					if (isset($data->media)) {
-						// Reddit embeds content for some sites (e.g. Twitter)
-						$embed = htmlspecialchars_decode(
-							$data->media->oembed->html
-						);
-					} else {
-						$embed = '';
-					}
+                    $images = [];
+                    foreach ($data->gallery_data->items as $media) {
+                        $id = $media->media_id;
+                        $type = $data->media_metadata->$id->m == 'image/gif' ? 'gif' : 'u';
+                        $src = $data->media_metadata->$id->s->$type;
+                        $images[] = '<figure><img src="' . $src . '"/></figure><br>';
+                    }
 
-					$item['content'] = $this->template(
-							$data->url,
-							$data->thumbnail,
-							$data->domain
-						) . $embed;
+                    $item['content'] = implode('', $images);
+                } elseif ($data->is_video) {
+                    // Video
 
-				} elseif (isset($data->post_hint) ? $data->post_hint == 'image' : false) {
-					// Single image
+                    if ($data->media->reddit_video) {
+                        $item['content'] = $this->createVideoContent($data->media->reddit_video);
+                    } else {
+                        // Higher index -> Higher resolution
+                        end($data->preview->images[0]->resolutions);
+                        $index = key($data->preview->images[0]->resolutions);
+                        $item['content'] = $this->createFigureLink($data->url, $data->preview->images[0]->resolutions[$index]->url, 'Video');
+                    }
+                } elseif (isset($data->media) && $data->media->type == 'youtube.com') {
+                    // Youtube link
+                    $item['content'] = handleYoutube($data->url);
+                } elseif (explode('.', $data->domain)[0] == 'self') {
+                    // Crossposted text post
+                    // TODO (optionally?) Fetch content of the original post.
+                    $item['content'] = $this->createLink($this->urlEncodePathParts($data->permalink), 'Crossposted from r/' . explode('.', $data->domain)[1]);
+                } else {
+                    // Link WITHOUT preview
+                    $item['content'] = $this->createLink($data->url, $data->domain);
+                }
 
-					$item['content'] = $this->link(
-						$this->encodePermalink($data->permalink),
-						'<img src="' . $data->url . '" />'
-					);
+                $this->items[] = $item;
+            }
+        }
+        // Sort the order to put the latest posts first, even for mixed subreddits
+        usort($this->items, function ($a, $b) {
+            return $b['timestamp'] <=> $a['timestamp'];
+        });
+    }
 
-				} elseif (isset($data->is_gallery) ? $data->is_gallery : false) {
-					// Multiple images
+    private static function createSearchParameters($search, $flareInput, $subreddit, bool $user, $section, $time, $queriedContext): array
+    {
+        $keywords = '';
 
-					$images = array();
-					foreach ($data->gallery_data->items as $media) {
-						$id = $media->media_id;
-						$type = $data->media_metadata->$id->m == 'image/gif' ? 'gif' : 'u';
-						$src = $data->media_metadata->$id->s->$type;
-						$images[] = '<figure><img src="' . $src . '"/></figure>';
-					}
+        if ($search) {
+            $keywords = str_replace([',', ' '], ' ', $search);
+            $keywords = $keywords . ' ';
+        }
 
-					$item['content'] = implode('', $images);
+        if ($flareInput && $queriedContext == 'single') {
+            $flair = $flareInput;
+            $flair = str_replace([',', ' '], ' ', $flair);
+            $flair = 'flair:"' . $flair . '" ';
+        } else {
+            $flair = '';
+        }
+        $name = trim($subreddit);
+        return [
+            'q' => $keywords . $flair . ($user ? 'author:' : 'subreddit:') . $name,
+            'sort' => $section,
+            'include_over_18' => 'on',
+            't' => $time
+        ];
+    }
 
-				} elseif ($data->is_video) {
-					// Video
+    public function getIcon()
+    {
+        return 'https://www.redditstatic.com/desktop2x/img/favicon/favicon-96x96.png';
+    }
 
-					// Higher index -> Higher resolution
-					end($data->preview->images[0]->resolutions);
-					$index = key($data->preview->images[0]->resolutions);
+    public function getName()
+    {
+        if ($this->queriedContext == 'single') {
+            return 'Reddit r/' . $this->getInput('r');
+        } elseif ($this->queriedContext == 'user') {
+            return 'Reddit u/' . $this->getInput('u');
+        } else {
+            return self::NAME;
+        }
+    }
 
-					$item['content'] = $this->template(
-						$data->url,
-						$data->preview->images[0]->resolutions[$index]->url,
-						'Video'
-					);
+    private function urlEncodePathParts($link)
+    {
+        return self::URI . implode('/', array_map('urlencode', explode('/', $link)));
+    }
 
-				} elseif (isset($data->media) ? $data->media->type == 'youtube.com' : false) {
-					// Youtube link
+    private function createFigureLink($href, $src, $caption)
+    {
+        return sprintf('<a href="%s"><figure><figcaption>%s</figcaption><img src="%s"/></figure></a>', $href, $caption, $src);
+    }
 
-					$item['content'] = $this->template(
-						$data->url,
-						$data->media->oembed->thumbnail_url,
-						'YouTube');
+    private function createLink($href, $text)
+    {
+        return sprintf('<a href="%s">%s</a>', $href, $text);
+    }
 
-				} elseif (explode('.', $data->domain)[0] == 'self') {
-					// Crossposted text post
-					// TODO (optionally?) Fetch content of the original post.
+    private function createVideoContent(\stdClass $video): string
+    {
+        return <<<HTML
+            <video width="$video->width" height="$video->height" controls>
+                <source src="$video->fallback_url" type="video/mp4">
+                Your browser does not support the video tag.
+            </video>
+        HTML;
+    }
 
-					$item['content'] = $this->link(
-						$this->encodePermalink($data->permalink),
-						'Crossposted from r/'
-						. explode('.', $data->domain)[1]
-					);
+    public function detectParameters($url)
+    {
+        try {
+            $urlObject = Url::fromString($url);
+        } catch (UrlException $e) {
+            return null;
+        }
 
-				} else {
-					// Link WITHOUT preview
+        $host = $urlObject->getHost();
+        $path = $urlObject->getPath();
 
-					$item['content'] = $this->link($data->url, $data->domain);
-				}
+        $pathSegments = explode('/', $path);
 
-				$this->items[] = $item;
-			}
-		}
-	}
+        if ($host !== 'www.reddit.com' && $host !== 'old.reddit.com') {
+            return null;
+        }
 
-	private function encodePermalink($link) {
-		return self::URI . implode(
-				'/',
-				array_map('urlencode', explode('/', $link))
-			);
-	}
+        if ($pathSegments[1] == 'r') {
+            return [
+                'context' => 'single',
+                'r' => $pathSegments[2],
+            ];
+        } elseif ($pathSegments[1] == 'user') {
+            return [
+                'context' => 'user',
+                'u' => $pathSegments[2],
+            ];
+        } else {
+            return null;
+        }
+    }
 
-	private function template($href, $src, $caption) {
-		return '<a href="' . $href . '"><figure><figcaption>'
-			. $caption . '</figcaption><img src="'
-			. $src . '"/></figure></a>';
-	}
-
-	private function link($href, $text) {
-		return '<a href="' . $href . '">' . $text . '</a>';
-	}
+    private function getRedditClient(): RedditClient
+    {
+        if ($this->redditClient === null) {
+            $this->redditClient = new RedditClient(
+                $this->cache,
+                $this->getOption('app_id'),
+                $this->getOption('app_secret')
+            );
+        }
+        return $this->redditClient;
+    }
 }

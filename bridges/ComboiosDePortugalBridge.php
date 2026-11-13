@@ -1,22 +1,60 @@
 <?php
-class ComboiosDePortugalBridge extends BridgeAbstract {
-	const NAME = 'CP | Avisos';
-	const BASE_URI = 'https://www.cp.pt';
-	const URI = self::BASE_URI . '/passageiros/pt';
-	const DESCRIPTION = 'Comboios de Portugal | Avisos';
-	const MAINTAINER = 'somini';
 
-	public function collectData() {
-		$html = getSimpleHTMLDOM($this->getURI() . '/consultar-horarios/avisos')
-			or returnServerError('Could not load content');
+declare(strict_types=1);
 
-		foreach($html->find('.warnings-table a') as $element) {
-			$item = array();
+class ComboiosDePortugalBridge extends BridgeAbstract
+{
+    const NAME = 'CP | Avisos';
+    const URI = 'https://www.cp.pt';
+    const DESCRIPTION = 'Comboios de Portugal | Avisos';
+    const MAINTAINER = 'FJSFerreira';
 
-			$item['title'] = $element->innertext;
-			$item['uri'] = self::BASE_URI . implode('/', array_map('urlencode', explode('/', $element->href)));
+    const PARAMETERS = [
+        [
+            'language' => [
+                'name' => 'Language',
+                'type' => 'list',
+                'values' => [
+                    'Português' => 'pt-PT',
+                    'English' => 'en-US'
+                ],
+                'defaultValue' => 'pt-PT'
+            ],
+            'category' => [
+                'name' => 'Category',
+                'type' => 'list',
+                'values' => [
+                    'All categories' => 0,
+                    'Alfa Pendular' => 50540,
+                    'Intercidades' => 57687,
+                    'Internacional' => 57690,
+                    'Regional' => 57693,
+                    'Turísticos / Históricos' => 57696,
+                    'Urbanos de Coimbra' => 57699,
+                    'Urbanos de Lisboa' => 57702,
+                    'Urbanos do Porto' => 57705
+                ],
+                'defaultValue' => 0
+            ]
+        ]
+    ];
 
-			$this->items[] = $item;
-		}
-	}
+    public function collectData()
+    {
+        $json = getContents(self::URI . '/bei/getContentsList?path=PWA/Homepage/Avisos&order=dateModified:desc&categoryId=' . $this->getInput('category'));
+
+        $data = Json::decode($json);
+
+        foreach ($data['item'] as $entry) {
+            $item = [];
+
+            // language defaults to portuguese
+            $item['title'] = $entry['title'][$this->getInput('language')] ?? $entry['title'][$this->getInput('pt-PT')];
+            $item['uri'] = self::URI . '/pt/detalhe-aviso/' . $entry['friendlyUrlPath'];
+            $item['timestamp'] = $entry['dateModified'];
+            $item['content'] = $entry['description'][$this->getInput('language')] ?? $entry['description'][$this->getInput('pt-PT')];
+
+            $this->items[] = $item;
+        }
+    }
 }

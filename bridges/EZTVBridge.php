@@ -1,67 +1,134 @@
 <?php
-class EZTVBridge extends BridgeAbstract {
 
-	const MAINTAINER = 'alexAubin';
-	const NAME = 'EZTV';
-	const URI = 'https://eztv.ch/';
-	const DESCRIPTION = 'Returns list of *recent* torrents for a specific show
-on EZTV. Get showID from URLs in https://eztv.ch/shows/showID/show-full-name.';
+declare(strict_types=1);
 
-	const PARAMETERS = array( array(
-		'i' => array(
-			'name' => 'Show ids',
-			'exampleValue' => 'showID1,showID2,…',
-			'required' => true
-		)
-	));
+/**
+ * api docs: https://eztv1.xyz/api/
+ */
+class EZTVBridge extends BridgeAbstract
+{
+    const MAINTAINER = 'alexAubin';
+    const NAME = 'EZTV';
+    const URI = 'https://eztvstatus.com';
+    const DESCRIPTION = 'Search for torrents by IMDB id. You can find IMDB id in the url of a tv show.';
 
-	public function collectData(){
+    const PARAMETERS = [
+        [
+            'ids' => [
+                'name' => 'IMDB ids',
+                'exampleValue' => '8740790,1733785',
+                'required' => true,
+                'title' => 'One or more IMDB ids'
+            ],
+            'no480' => [
+                'name' => 'No 480p',
+                'type' => 'checkbox',
+                'title' => 'Activate to exclude 480p torrents'
+            ],
+            'no720' => [
+                'name' => 'No 720p',
+                'type' => 'checkbox',
+                'title' => 'Activate to exclude 720p torrents'
+            ],
+            'no1080' => [
+                'name' => 'No 1080p',
+                'type' => 'checkbox',
+                'title' => 'Activate to exclude 1080p torrents'
+            ],
+            'no2160' => [
+                'name' => 'No 2160p',
+                'type' => 'checkbox',
+                'title' => 'Activate to exclude 2160p torrents'
+            ],
+            'noUnknownRes' => [
+                'name' => 'No Unknown resolution',
+                'type' => 'checkbox',
+                'title' => 'Activate to exclude unknown resolution torrents'
+            ],
+        ]
+    ];
 
-		// Make timestamp from relative released time in table
-		function makeTimestamp($relativeReleaseTime){
+    public function collectData()
+    {
+        $eztv_uri = $this->getEztvUri();
+        $ids = explode(',', trim($this->getInput('ids')));
+        foreach ($ids as $id) {
+            $url = sprintf('%s/api/get-torrents?imdb_id=%s', $eztv_uri, $id);
+            $json = getContents($url);
+            $data = json_decode($json);
+            if (!isset($data->torrents)) {
+                // No results
+                continue;
+            }
+            foreach ($data->torrents as $torrent) {
+                $title = $torrent->title;
+                $regex480 = '/480p/';
+                $regex720 = '/720p/';
+                $regex1080 = '/1080p/';
+                $regex2160 = '/2160p/';
+                $regexUnknown = '/(480p|720p|1080p|2160p)/';
+                // Skip unwanted resolution torrents
+                if (
+                    (preg_match($regex480, $title) === 1 && $this->getInput('no480'))
+                    || (preg_match($regex720, $title) === 1 && $this->getInput('no720'))
+                    || (preg_match($regex1080, $title) === 1 && $this->getInput('no1080'))
+                    || (preg_match($regex2160, $title) === 1 && $this->getInput('no2160'))
+                    || (preg_match($regexUnknown, $title) !== 1 && $this->getInput('noUnknownRes'))
+                ) {
+                    continue;
+                }
+                $this->items[] = $this->getItemFromTorrent($torrent);
+            }
+        }
+        usort($this->items, function ($torrent1, $torrent2) {
+            return $torrent2['timestamp'] <=> $torrent1['timestamp'];
+        });
+    }
 
-			$relativeDays = 0;
-			$relativeHours = 0;
+    protected function getEztvUri()
+    {
+        $html = getSimpleHTMLDom(self::URI);
+        $urls = $html->find('a.domainLink');
+        foreach ($urls as $url) {
+            $headers = get_headers($url->href);
+            if (substr($headers[0], 9, 3) === '200') {
+                return $url->href;
+            }
+        }
+        throw new Exception('No valid EZTV URI available');
+    }
 
-			foreach(explode(' ', $relativeReleaseTime) as $relativeTimeElement) {
-				if(substr($relativeTimeElement, -1) == 'd') $relativeDays = substr($relativeTimeElement, 0, -1);
-				if(substr($relativeTimeElement, -1) == 'h') $relativeHours = substr($relativeTimeElement, 0, -1);
-			}
-			return mktime(date('h') - $relativeHours, 0, 0, date('m'), date('d') - $relativeDays, date('Y'));
-		}
+    protected function getItemFromTorrent($torrent)
+    {
+        $episode_url = $torrent->episode_url ?? null;
+        $torrent_url = $torrent->torrent_url ?? null;
+        $magnet_url = $torrent->magnet_url ?? null;
 
-		// Loop on show ids
-		$showList = explode(',', $this->getInput('i'));
-		foreach($showList as $showID) {
+        $item = [];
 
-			// Get show page
-			$html = getSimpleHTMLDOM(self::URI . 'shows/' . rawurlencode($showID) . '/')
-				or returnServerError('Could not request EZTV for id "' . $showID . '"');
+        $item['uri'] = $episode_url ?? $torrent_url;
+        $item['author'] = $torrent->imdb_id;
+        $item['timestamp'] = $torrent->date_released_unix;
+        $item['title'] = $torrent->title;
 
-			// Loop on each element that look like an episode entry...
-			foreach($html->find('.forum_header_border') as $element) {
+        $thumbnailUri = 'https:' . $torrent->small_screenshot;
+        $torrentSize = format_bytes((int) $torrent->size_bytes);
 
-				// Filter entries that are not episode entries
-				$ep = $element->find('td', 1);
-				if(empty($ep)) continue;
-				$epinfo = $ep->find('.epinfo', 0);
-				$released = $element->find('td', 3);
-				if(empty($epinfo)) continue;
-				if(empty($released->plaintext)) continue;
+        $content = $torrent->filename . '<br>File size: ' . $torrentSize;
 
-				// Filter entries that are older than 1 week
-				if($released->plaintext == '&gt;1 week') continue;
+        if ($magnet_url) {
+            $content .= '<br><a href="' . $magnet_url . '">magnet link</a>';
+        }
 
-				// Fill item
-				$item = array();
-				$item['uri'] = self::URI . $epinfo->href;
-				$item['id'] = $item['uri'];
-				$item['timestamp'] = makeTimestamp($released->plaintext);
-				$item['title'] = $epinfo->plaintext;
-				$item['content'] = $epinfo->alt;
-				if(isset($item['title']))
-					$this->items[] = $item;
-			}
-		}
-	}
+        if ($torrent_url) {
+            $item['enclosures'][] = $torrent_url;
+            $content .= '<br><a href="' . $torrent_url . '">torrent link</a>';
+        }
+
+        $content .= '<br><img src="' . $thumbnailUri . '" />';
+
+        $item['content'] = $content;
+
+        return $item;
+    }
 }

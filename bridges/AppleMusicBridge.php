@@ -1,70 +1,127 @@
 <?php
 
-class AppleMusicBridge extends BridgeAbstract {
-	const NAME = 'Apple Music';
-	const URI = 'https://www.apple.com';
-	const DESCRIPTION = 'Fetches the latest releases from an artist';
-	const MAINTAINER = 'Limero';
-	const PARAMETERS = array(array(
-		'url' => array(
-			'name' => 'Artist URL',
-			'exampleValue' => 'https://itunes.apple.com/us/artist/dunderpatrullen/329796274',
-			'required' => true,
-		),
-		'imgSize' => array(
-			'name' => 'Image size for thumbnails (in px)',
-			'type' => 'number',
-			'defaultValue' => 512,
-			'required' => true,
-		)
-	));
-	const CACHE_TIMEOUT = 21600; // 6 hours
+class AppleMusicBridge extends BridgeAbstract
+{
+    const NAME = 'Apple Music';
+    const URI = 'https://www.apple.com';
+    const DESCRIPTION = 'Fetches the latest releases from an artist';
+    const MAINTAINER = 'bockiii';
+    const PARAMETERS = [[
+        'artist' => [
+            'name' => 'Artist ID',
+            'exampleValue' => '909253',
+            'required' => true,
+        ],
+        'limit' => [
+            'name' => 'Latest X Releases (max 50)',
+            'defaultValue' => '10',
+            'required' => true,
+        ],
+    ]];
+    const CACHE_TIMEOUT = 60 * 60 * 6; // 6 hours
 
-	private $title;
+    private $title;
 
-	public function collectData() {
-		$url = $this->getInput('url');
-		$html = getSimpleHTMLDOM($url)
-			or returnServerError('Could not request: ' . $url);
+    public function collectData()
+    {
+        $items = $this->getJson();
+        $artist = $this->getArtist($items);
 
-		$imgSize = $this->getInput('imgSize');
+        $this->title = $artist->artistName;
 
-		$this->title = $html->find('title', 0)->innertext;
+        foreach ($items as $item) {
+            if ($item->wrapperType === 'collection') {
+                $copyright = $item->copyright ?? '';
+                $artworkUrl500 = str_replace('/100x100', '/500x500', $item->artworkUrl100);
+                $artworkUrl2000 = str_replace('/100x100', '/2000x2000', $item->artworkUrl100);
+                $escapedCollectionName = htmlspecialchars($item->collectionName);
 
-		// Grab the json data from the page
-		$html = $html->find('script[id=shoebox-ember-data-store]', 0);
-		$html = strstr($html, '{');
-		$html = substr($html, 0, -9);
-		$json = json_decode($html);
+                $this->items[] = [
+                    'title' => $item->collectionName,
+                    'uri' => $item->collectionViewUrl,
+                    'timestamp' => $item->releaseDate,
+                    'enclosures' => $artworkUrl500,
+                    'author' => $item->artistName,
+                    'content' => "<figure>
+    <img srcset=\"$item->artworkUrl60 60w, $item->artworkUrl100 100w, $artworkUrl500 500w, $artworkUrl2000 2000w\"
+         sizes=\"100%\" src=\"$artworkUrl2000\"
+         alt=\"Cover of $escapedCollectionName\"
+         style=\"display: block; margin: 0 auto;\" />
+    <figcaption>
+        from <a href=\"$artist->artistLinkUrl\">$item->artistName</a><br />$copyright
+    </figcaption>
+</figure>",
+                ];
+            }
+        }
+    }
 
-		// Loop through each object
-		foreach ($json->included as $obj) {
-			if ($obj->type === 'lockup/album') {
-				$this->items[] = array(
-					'title' => $obj->attributes->artistName . ' - ' . $obj->attributes->name,
-					'uri' => $obj->attributes->url,
-					'timestamp' => $obj->attributes->releaseDate,
-					'enclosures' => $obj->relationships->artwork->data->id,
-				);
-			} elseif ($obj->type === 'image') {
-				$images[$obj->id] = $obj->attributes->url;
-			}
-		}
+    private function getJson()
+    {
+        # Limit the amount of releases to 50
+        if ($this->getInput('limit') > 50) {
+            $limit = 50;
+        } else {
+            $limit = $this->getInput('limit');
+        }
 
-		// Add the images to each item
-		foreach ($this->items as &$item) {
-			$item['enclosures'] = array(
-				str_replace('{w}x{h}bb.{f}', $imgSize . 'x0w.jpg', $images[$item['enclosures']]),
-			);
-		}
+        $url = 'https://itunes.apple.com/lookup?id=' . $this->getInput('artist') . '&entity=album&limit=' . $limit . '&sort=recent';
+        $html = getContents($url);
+        $json = json_decode($html);
+        $result = $json->results;
 
-		// Sort the order to put the latest albums first
-		usort($this->items, function($a, $b){
-			return $a['timestamp'] < $b['timestamp'];
-		});
-	}
+        if (!is_array($result) || count($result) == 0) {
+            throwServerException('There is no artist with id "' . $this->getInput('artist') . '".');
+        }
 
-	public function getName() {
-		return $this->title ?: parent::getName();
-	}
+        return $result;
+    }
+
+    private function getArtist($json)
+    {
+        $nameArray = array_filter($json, function ($obj) {
+            return $obj->wrapperType == 'artist';
+        });
+
+        if (count($nameArray) === 1) {
+            return $nameArray[0];
+        }
+
+        return parent::getName();
+    }
+
+    public function getName()
+    {
+        if (isset($this->title)) {
+            return $this->title;
+        }
+
+        return parent::getName();
+    }
+
+    public function getIcon()
+    {
+        if (empty($this->getInput('artist'))) {
+            return parent::getIcon();
+        }
+
+        try {
+            // Apple redirects (301) if the artist name in the url is wrong, so use the canonical link
+            $lookup = json_decode(getContents('https://itunes.apple.com/lookup?id=' . urlencode($this->getInput('artist'))));
+            $url = strtok($lookup->results[0]->artistLinkUrl ?? '', '?');
+            if (!$url) {
+                return parent::getIcon();
+            }
+
+            $html = getSimpleHTMLDOMCached($url);
+            $meta = $html->find('meta[property="og:image"]', 0);
+            if (!$meta) {
+                return parent::getIcon();
+            }
+
+            return preg_replace('/\/\d*x\d*cw/i', '/144x144-999', $meta->content);
+        } catch (\Exception $e) {
+            return parent::getIcon();
+        }
+    }
 }
